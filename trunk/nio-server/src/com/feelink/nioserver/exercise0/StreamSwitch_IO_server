@@ -1,0 +1,751 @@
+//================= StreamSwitch.java =======================================//
+ 
+package pkwnet.msgswitch;
+ 
+import java.io.*;
+import java.net.*;
+import java.util.*;
+ 
+/**
+ * a simple message switch using stream based socket i/o
+ * a very simple text message switching program
+ * default command line is java StreamSwitch -p5050 -i600
+ * -p port to listen on
+ * -i default idle time in seconds
+ * user commands start with $ and consist of blank seperated arguments
+ * other lines sent by the user are forwarded
+ * $on nickname targets
+ *    sign on as nickname, sending to targets
+ * $to targets
+ *    change target list, reports current value
+ * $list nicknames
+ *    list status of specified nicknames
+ * $list
+ *    list all connected users
+ * $off
+ *    sign off
+ *
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public class StreamSwitch
+{
+        private UserTable perUser = new UserTable();
+        private Timer idleTimer;
+        private Connection conn;
+        
+        private void listen(int port, int idleTime)
+        {
+                idleTimer = new Timer();
+                idleTimer.scheduleAtFixedRate(new TimerTask(){public void run(){oneSec();}},0,1000);
+ 
+                try
+                {
+                        ServerSocket ss = new ServerSocket(port);
+                        Functions.dout(12,"listening on port "+port);
+                        while(true)
+                        {
+                                Socket us = ss.accept();
+                                conn = new StreamConnection(us);                        
+                                new User(conn, perUser, idleTime);
+                        }
+                }
+                catch(Exception e){     e.printStackTrace();}
+                idleTimer.cancel();
+        }
+ 
+        static public void main(String [] args)
+        {
+                int port = 5050;
+                int idleTime = 600;
+                int level = 2;
+ 
+                for(int i = 0; i<args.length; i++)
+                {
+                        if(args[i].startsWith("-p"))port = Functions.toInt(args[i].substring(2),port);
+                        if(args[i].startsWith("-i"))idleTime = Functions.toInt(args[i].substring(2),idleTime);
+                        if(args[i].startsWith("-d"))level = Functions.toInt(args[i].substring(2),level);
+                }
+                Functions.setDebugLevel(level);
+                new StreamSwitch().listen(port,idleTime);
+        }
+ 
+        private void oneSec()
+        {
+                Object[] uv = perUser.allUsers();
+                for(int i=0; i<uv.length; i++)((User)uv[i]).oneSec();
+        }
+}
+ 
+//================= StreamConnection.java ===================================//
+ 
+package pkwnet.msgswitch;
+import java.net.*;
+import java.io.*;
+/**
+ * describes a connection between a stream socket and a user
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public class StreamConnection implements Connection
+{
+        private Socket sock;
+        private BufferedReader in;
+        private BufferedWriter out;
+        private int state = Connection.CLOSED;
+        private Thread recvThread;
+        private Thread sendThread;
+        private java.util.LinkedList sendQ = new java.util.LinkedList();
+        private ConnectionUser cu;
+        private String name;
+                
+        StreamConnection(Socket sock)
+        {
+                state = Connection.OPENING;
+                this.sock = sock;
+        }
+        
+        /**
+         * links this connection to a user
+         */
+        public void attach(ConnectionUser cu)
+        {
+                this.cu = cu;
+                name = ""+sock.getInetAddress()+":"+sock.getPort();
+                Functions.dout(12,"connection from "+name);
+                try
+                {
+                        in = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+                        out = new BufferedWriter(new OutputStreamWriter(sock.getOutputStream()));
+ 
+                        recvThread = new Thread(new Runnable()
+                        {public void run(){doRecv();}},"Recv."+name);
+                        sendThread = new Thread(new Runnable()
+                        {public void run(){doSend();}},"Send."+name );
+                        sendThread.start();
+                        recvThread.start();
+                        state = Connection.OPENED;
+                }
+                catch(IOException e)
+                {
+                        e.printStackTrace();
+                        close();
+                        name = "";
+                }
+        }
+ 
+        /**
+         * send a character string out on the socket
+         */
+        public synchronized void send(String msg)
+        {
+                sendQ.add(msg);
+                this.notify();
+        }
+ 
+        /** 
+         * close the connection and the socket
+         */
+        public void close()
+        {       
+                if(state > 0)
+                {
+                        state = 0;
+                        try{sock.close();}catch(Exception e){e.printStackTrace();}
+                        if (sendThread.isAlive())sendThread.interrupt();
+                }
+        }
+        
+        /**
+         * get the connection state
+         */
+        public int getState(){return state;}
+        /**
+         * get the connection name
+         */
+        public String getName(){return name;}
+        /**
+         * set the connection name
+         */
+        public void setName(String name)
+        {
+                this.name = name;
+                try
+                {
+                        recvThread.setName("recv."+name);
+                        sendThread.setName("send."+name);
+                }
+                catch(Exception e){System.out.println(e);}
+        }
+        
+        /**
+         * the main loop for the send thread
+         */
+        private void doSend()
+        {
+                String msg;
+                try
+                {
+                        while (null != (msg = popMessage()))
+                        {
+                                out.write(msg);
+                                out.flush();
+                        }
+                }
+                catch(InterruptedException ie){}        // ignore interrupts
+                catch(IOException e){e.printStackTrace();}
+                Functions.dout(2,"Thread="+Thread.currentThread().getName()+" ending");
+        }
+        
+        /**
+         * the main loop for the receive thread
+         */
+        private void doRecv()
+        {
+                String inbuf;
+ 
+                while (0 != state)
+                {
+                        try{inbuf = in.readLine();}
+                        catch(Exception e){System.out.println(e); inbuf = null;}
+                        if(inbuf == null)close();
+                        else
+                        {
+                                System.out.println("received ("+inbuf+") from user="+name);
+                                cu.receive(inbuf+"\r\n");
+                        }
+                }
+                Functions.dout(2,"Thread="+Thread.currentThread().getName()+" ending");
+        }
+ 
+        /**
+         * pop a message off the send queue
+         */
+        private synchronized String popMessage() throws InterruptedException
+        {
+                String msg = null;
+                while (state > Connection.CLOSED && sendQ.size() == 0)this.wait();
+                if(state > Connection.CLOSED)msg = (String)sendQ.remove(0);
+                return msg;
+        }
+}
+ 
+//================= Connection.java =========================================//
+ 
+package pkwnet.msgswitch;
+ 
+/**
+ * describes a connection between a user and a network tranport
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public interface Connection
+{
+        static public final int CLOSED=0;
+        static public final int OPENING=1;
+        static public final int OPENED=2;
+        static public final int CLOSING=3;
+        
+        public void attach(ConnectionUser cu);
+        public void send(String str);
+        public void close();
+        public int getState();
+        public void setName(String name);
+        public String getName();
+}
+ 
+//================= ConnectionUser.java =====================================//
+ 
+package pkwnet.msgswitch;
+/**
+ * describes a user of a Connection 
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public interface ConnectionUser
+{
+        public void receive(String str);
+        public void stateChange(int state);
+}
+ 
+//================= User.java  ==============================================//
+ 
+package pkwnet.msgswitch;
+import java.io.*;
+import java.util.*;
+/**
+ * defines the processing for a message switch user
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public class User implements ConnectionUser
+{
+        private UserTable perUser;
+        private String name ="";
+        private boolean signedOn = false;
+        private String[] targets;
+        private int remainingTime;
+        private int idleTime;
+        Connection conn;
+        
+        /**
+         * construct a user, link it to its connection and put it in the perUser table
+         */
+        User(Connection c, UserTable p, int idle)
+        {
+                conn = c;
+                conn.attach(this);
+                name = conn.getName();
+                perUser = p;
+                idleTime = idle;
+                remainingTime = idleTime;
+                perUser.add(name,this);
+                targets = new String[0];
+        }
+ 
+        /**
+         * process state changes
+         */
+        public void stateChange(int state)
+        {
+                if(state == Connection.CLOSED)close();
+        }
+        
+        public void oneSec(){if(idleTime != 0 && 1 > --remainingTime)close();}
+ 
+        public void send(String msg){conn.send(msg);}
+        
+        /**
+         * receive string messages and distiguish between control and data
+         */
+        public void receive(String msg)
+        {
+                if(msg.startsWith("$"))doCommand(msg);
+                else forward(msg);
+                remainingTime = idleTime;
+        }
+        
+        /**
+         * forward data messages to other users
+         */
+        private void forward(String txt)
+        {
+                txt = name+": "+txt;
+                if(0 < targets.length)
+                {
+                        for(int i = 0; i<targets.length; i++)
+                        {
+                                User u = perUser.get(targets[i]);
+                                if(u != null)u.send(txt);
+                        }
+                }
+                else
+                {
+                        User[] uv = perUser.allUsers();
+                        for(int i= 0; i<uv.length;i++)
+                        {
+                                if(uv[i] != this)uv[i].send(txt);
+                        }
+                }
+        }
+ 
+        /**
+         * execute command messages
+         */
+        private void doCommand(String inbuf)
+        {
+                boolean good = false;
+                inbuf = inbuf.substring(1).trim();      // discard leading $ and blanks
+                if(inbuf.length() > 0)
+                {
+                        String [] args = inbuf.split("\\s+");   // split up on blanks
+                        if(args[0].equals("on"))good = signOn(args);
+                        else if(args[0].equals("off"))good = signOff(args);
+                        else if(args[0].equals("list"))good = listUsers(args);
+                        else if(args[0].equals("to"))good = setTargets(args,1);
+                        else if(args[0].equals("idle"))good = setIdle(args);
+                }
+                if(!good)
+                {
+                        send("invalid command="+inbuf+"\n");
+                }
+        }
+ 
+        /**
+         * sign on command
+         */
+        private boolean signOn(String [] args)
+        {
+                boolean good = false;
+                if(args.length >1)
+                {
+                        String nm = args[1];
+ 
+                        if(perUser.rename(name,nm))
+                        {
+                                name = nm;
+                                send("Signed on as "+nm+"\n");
+                                signedOn = true;
+                                good = true;
+                                setTargets(args,2);
+                                conn.setName(nm);
+                        }
+                        else send("name="+nm+" already signed on\n");
+                }
+                return good;
+        }
+ 
+        /**
+         * set forwarding targets
+         */
+        private boolean setTargets(String [] args, int i)
+        {
+                int j;
+                if(i < args.length)
+                {
+                        targets = new String[args.length-i];
+                        for(j = 0; j < args.length-i;j++){targets[j] = args[i+j];}
+                }
+                String str = "to=";
+                for(j = 0; j < targets.length; j++)str += (targets[j]+" ");
+                send(str+"\n");
+                return true;
+        }
+ 
+        /** 
+         * set idle timeout
+         */
+        private boolean setIdle(String[] args)
+        {
+                try
+                {
+                        int n = new Integer(args[1]).intValue();
+                        idleTime=n;
+                        send("idle time set to "+idleTime+"\r\n");
+                        return true;
+                }
+                catch(NumberFormatException exc){return false;}
+        }
+ 
+        /**
+         * sign off
+         */
+        private boolean signOff(String [] args)
+        {
+                close();
+                return true;
+        }
+ 
+        /**
+         * list connected users
+         */
+        private boolean listUsers(String [] args)
+        {
+                TreeSet allUsers = new TreeSet(perUser.keySet());
+                HashSet t = new HashSet(Arrays.asList(targets));
+                Object[] users;
+                String resp = "On,Target,Nickname\n";
+                int i=0;
+                if(args.length < 2)users = allUsers.toArray();
+                else                    // all users
+                {
+                        users = args;
+                        i = 1;
+                }
+ 
+                for(;i<users.length; i++)
+                {
+                        String u = (String)users[i];
+                        System.out.println("users["+i+"]="+u);
+                        if(u.equals(name))resp+="*,";
+                        else resp += (allUsers.contains(u)?"y,":"n,");
+                        resp += (t.contains(u)?"y,":"n,");
+                        resp += (u+"\n");
+                }
+                send(resp);
+                return true;
+        }
+ 
+        /**
+         * delete from perUser and close our connection
+         */
+        private void close()
+        {
+                System.out.println ("closing user "+name);
+                perUser.delete(name);
+                conn.close();
+        }
+}
+ 
+//================= UserTable.java ==========================================//
+ 
+package pkwnet.msgswitch;
+/**
+ * a synchronized map of users keyed by name
+ * provides a rename method, other methods are overloaded, not overridden
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public class UserTable extends java.util.TreeMap
+{
+        public synchronized User get(String name){return (User)super.get(name);}
+ 
+        public synchronized boolean add(String name, User user)
+        {
+                if(containsKey(name))return false;      // don't reuse
+                {
+                        put(name, user);
+                        return true;
+                }
+        }
+ 
+        public synchronized void delete(String name){remove(name);}
+ 
+        public synchronized boolean rename(String oldName, String newName)
+        {
+                if(oldName.equals(newName))return true;
+                User u = get(oldName);
+                if(containsKey(newName) || u == null)return false;
+                else
+                {
+                        remove(oldName);
+                        add(newName,u);
+                }
+                return true;
+        }
+        
+        public synchronized User[] allUsers()
+        {
+                Object [] ov = this.values().toArray();
+                User [] uv = new User[ov.length];
+                for(int i=0; i<ov.length;i++)uv[i]=(User)ov[i];
+                return uv;
+        }
+}
+//================= Functions.java ==========================================//
+ 
+package pkwnet.msgswitch;
+ 
+/**
+ * a few static methods (functions) used throughout this code
+ * @author PKWooster
+ * @version 1.0 June 15,2004
+ */
+public class Functions
+{
+        private static int debugLevel = 2;
+        
+        public static void setDebugLevel(int level){debugLevel = level;}
+        
+        public static void dout(int level, String s)
+        {
+                if(level >= debugLevel)System.out.println(s);
+        }
+        
+        public static void fail(Exception e, String s)
+        {
+                if(e != null)e.printStackTrace();
+                if(s != null)System.out.println(s);
+                System.exit(0);
+        }
+ 
+        public static int toInt(String s, int er)
+        {
+                int i;
+ 
+                try{i = new Integer(s).intValue();}
+                catch(NumberFormatException exc){i =er;}
+                return i;
+        }
+}
+
+
+//////////////////////////////////////////////////////////////////////////////
+update /////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////
+
+//================= StreamConnection.java ===================================//
+ 
+package pkwnet.msgswitch;
+import java.net.*;
+import java.io.*;
+/**
+ * describes a connection between a stream socket and a user
+ * @author PKWooster
+ * @version 1.1 June 22,2004
+ */
+public class StreamConnection implements Connection
+{
+        private Socket sock;
+        private BufferedReader in;
+        private BufferedWriter out;
+        private int state = Connection.CLOSED;
+        private Thread recvThread;
+        private Thread sendThread;
+        private java.util.LinkedList sendQ = new java.util.LinkedList();
+        private ConnectionUser cu;
+        private String name;
+                
+        StreamConnection(Socket sock)
+        {
+                state = Connection.OPENING;
+                this.sock = sock;
+        }
+        
+        /**
+         * links this connection to a user
+         */
+        public void attach(ConnectionUser cu)
+        {
+                this.cu = cu;
+                name = ""+sock.getInetAddress()+":"+sock.getPort();
+                Functions.dout(12,"connection from "+name);
+                try
+                {
+                        in = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+                        out = new BufferedWriter(new OutputStreamWriter(sock.getOutputStream()));
+ 
+                        recvThread = new Thread(new Runnable()
+                        {public void run(){doRecv();}},"Recv."+name);
+                        sendThread = new Thread(new Runnable()
+                        {public void run(){doSend();}},"Send."+name );
+                        sendThread.start();
+                        recvThread.start();
+                        state = Connection.OPENED;
+                        if(cu != null)cu.stateChange(state);
+                }
+                catch(IOException e)
+                {
+                        e.printStackTrace();
+                        close();
+                        name = "";
+                }
+        
+        }
+ 
+        /**
+         * send a character string out on the socket
+         */
+        public synchronized void send(String msg)
+        {
+                sendQ.add(msg);
+                this.notify();
+        }
+ 
+        /** 
+         * close the connection and the socket
+         */
+        public void close()
+        {      
+                if(state == Connection.OPENED)
+                {
+                        state = Connection.CLOSING;
+                        try{sock.shutdownOutput();}catch(IOException ie){ie.printStackTrace();}
+                        if(cu != null)cu.stateChange(state);
+                }
+                else if(state != Connection.CLOSED)
+                {
+                        try{sock.close();}catch(Exception e){e.printStackTrace();}
+                        if (sendThread.isAlive())sendThread.interrupt();
+                        state = Connection.CLOSED;
+                }
+                if(cu != null)cu.stateChange(state);
+        }
+        
+        /**
+         * get the connection state
+         */
+        public int getState(){return state;}
+        /**
+         * get the connection name
+         */
+        public String getName(){return name;}
+        /**
+         * set the connection name
+         */
+        public void setName(String name)
+        {
+                this.name = name;
+                try
+                {
+                        recvThread.setName("recv."+name);
+                        sendThread.setName("send."+name);
+                }
+                catch(Exception e){System.out.println(e);}
+        }
+        
+        /**
+         * the main loop for the send thread
+         */
+        private void doSend()
+        {
+                String msg;
+                try
+                {
+                        while (null != (msg = popMessage()))
+                        {
+                                out.write(msg);
+                                out.flush();
+                        }
+                }
+                catch(InterruptedException ie){}        // ignore interrupts
+                catch(IOException e){e.printStackTrace();}
+                Functions.dout(2,"Thread="+Thread.currentThread().getName()+" ending");
+        }
+        
+        /**
+         * the main loop for the receive thread
+         */
+        private void doRecv()
+        {
+                String inbuf;
+ 
+                while (0 != state)
+                {
+                        try{inbuf = in.readLine();}
+                        catch(Exception e){System.out.println(e); inbuf = null;}
+                        if(inbuf == null)close();
+                        else
+                        {
+                                System.out.println("received ("+inbuf+") from user="+name);
+                                cu.receive(inbuf+"\r\n");
+                        }
+                }
+                Functions.dout(2,"Thread="+Thread.currentThread().getName()+" ending");
+        }
+ 
+        /**
+         * pop a message off the send queue
+         */
+        private synchronized String popMessage() throws InterruptedException
+        {
+                String msg = null;
+                while (state > Connection.CLOSED && sendQ.size() == 0)this.wait();
+                if(state > Connection.CLOSED)msg = (String)sendQ.remove(0);
+                return msg;
+        }
+}
+
+////////////////////////////////////////////////////////////////////////////////////
+update////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////
+
+public void close()
+        {      
+                if(state == Connection.OPENED)
+                {
+                        state = Connection.CLOSING;
+                        try{sock.shutdownOutput();}catch(IOException ie){ie.printStackTrace();}
+                        if(cu != null)cu.stateChange(state);
+                }
+                else if(state != Connection.CLOSED)
+                {
+                        try{sock.close();}catch(Exception e){e.printStackTrace();}
+                        if (sendThread.isAlive())sendThread.interrupt();
+                        state = Connection.CLOSED;
+                        if(cu != null)cu.stateChange(state);
+                }
+        }
+
+
+

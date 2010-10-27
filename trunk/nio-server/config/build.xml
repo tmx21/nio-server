@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="euc-kr"?>
+<project name="ems-new" default="dist">
+	
+	<!-- 프로퍼티파일을 지정합니다 -->
+	<property file="build.properties" />
+	<!-- 프로젝트의 루트디렉토리를 지정합니다 -->
+	<property name="base.dir" value="."/>
+	<!-- 배포파일의 저장디렉토리를 지정합니다 -->
+	<property name="dist.dir" value="dist"/>
+	<!-- 빌드후 생기는 파일의 저장디렉토리를 지정합니다 -->
+	<property name="build.dir" value="build"/>
+	<!-- 소스파일의 저장디렉토리를 지정합니다 -->
+	<property name="src.dir" value="src"/>
+	<!-- jar파일의 이름을 지정합니다. -->
+	<property name="jar.file" value="ems_new_${version}.jar"/>
+	<!-- 배포파일인  zip파일의 이름을 지정합니다 -->
+	<property name="zip.file" value="ems_new_${version}.zip"/>
+		
+	<!-- 각 target을 실행하기전 준비하는 prepare target을 설정합니다. -->
+	<target name="prepare">
+		<!-- time stamp를 찍습니다. 빌드타임 체크 -->
+		<tstamp>
+			<!-- day stamp의 페턴을 정의합니다 -->
+			<format property="DSTAMP" pattern="yyyy.MM.dd" />
+			<!-- time stamp의 페턴을 정의합니다 -->
+			<format property="TSTAMP" pattern="HH:mm" />			
+		</tstamp>		
+		<!-- echo tag를 이용하여  빌드시작메시지와 시작시간을 알립니다 -->
+		<echo message="Build Start!! ============== [ ${DSTAMP} ${TSTAMP} ] " />
+	</target>	
+	<!-- 컴파일 디렉토리에 클래스가 존재하면 지운다. prepare가 진행되야 진행된다 -->
+	<target name="clean" depends="prepare">
+		<!-- 먼저만들어진 클래스들이 있을수 있으므로 지웁니다 -->
+		<delete dir="${dist.dir}" />
+		<delete dir="${build.dir}" />
+	</target>
+	<!-- 소스컴파일, 이때 클래스 패스를 명시. clean이 진행되야 진행된다 -->
+	<target name="compile" depends="clean">
+		<!-- 저장할 디렉토리를 만듭니다 -->
+		<mkdir dir="${build.dir}" />
+		<!-- javac 태그를 이용하여 컴파일합니다 -->
+		<javac deprecation="off" srcdir="${src.dir}" destdir="${build.dir}" listfiles="no" failonerror="true">
+			<!-- 각  path를 설정합니다 -->
+			<classpath>
+				<!-- 라이브러리 패스를 설정합니다 -->
+				<pathelement path="${base.dir}/lib" />
+				<!-- 라이브러리 파일셋을 구성합니다 -->
+				<fileset dir="${base.dir}/lib">
+					<!-- 라이브러리 파일을 포함시킵니다 -->
+					<include name="*.jar" />
+				</fileset>
+			</classpath>
+		</javac>				
+	</target>
+	<!-- 컴파일된 클래스를 jar파일로 묶는다. complie이 진행되야 진행된다 -->
+	<target name="mkjar" depends="compile">
+		<!-- 디렉토리를 만듭니다 -->
+		<mkdir dir="${dist.dir}" />
+		<!-- jar태그를 이용하여 컴파일된 클래스를 jar파일로 묶습니다 -->
+		<jar destfile="${dist.dir}/${jar.file}" basedir="${build.dir}" />
+	</target>
+	<!-- 배포에 필요한 디렉토리 및 파일을 zip파일로 묶는다. mkjar가 진행되야 진행된다 -->
+	<target name="dist" depends="mkjar" >
+		<!-- 배포를 위해 라이브러리 파일을 복사합니다 -->
+		<copy todir="${dist.dir}/lib" >
+			<fileset dir="lib" />
+		</copy>
+		<!-- 배포를 위해 소스파일을 복사합니다 -->
+		<copy todir="${dist.dir}/src" >
+			<fileset dir="src" />
+		</copy>
+		<!-- zip태그를 이용하여 배포디렉토리를 zip으로 묶습니다 -->
+		<zip destfile="${DSTAMP}_${zip.file}" >
+			<fileset dir="${dist}/.." />
+		</zip>
+	</target>
+	<!-- 어플리케이션을 실행 -->
+	<target name="run">
+		<!-- 실행할 메인 클래스를  지정합니다 -->
+		<java classname="test.exercise.AntTest" >
+			<classpath>
+				<!-- 메인클래스의 패스를 설정합니다 -->
+				<pathelement location="${dist.dir}/${jar.file}" />
+				<pathelement path="${base.dir}"/>
+				<fileset dir="${base.dir}/lib" >
+					<include name="*.jar" />
+				</fileset>
+			</classpath>
+		</java>
+	</target>
+	
+</project>
